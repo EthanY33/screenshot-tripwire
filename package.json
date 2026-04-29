@@ -1,0 +1,42 @@
+{
+  "name": "screenshot-tripwire",
+  "version": "0.1.0",
+  "description": "Pattern-checker for marketing image assets — catches AI-default tells (wrong Steam capsule dims, transparent corners, monochrome flat palettes, blank frames). Sibling to trailer-tripwire.",
+  "license": "MIT",
+  "author": "Ethan Yucetepe",
+  "type": "module",
+  "main": "lib/audit.mjs",
+  "bin": {
+    "screenshot-tripwire": "bin/cli.mjs",
+    "st": "bin/cli.mjs"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "pngjs": "^7.0.0",
+    "jpeg-js": "^0.4.4"
+  },
+  "scripts": {
+    "test": "node lib/audit.mjs --help || true"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EthanY33/screenshot-tripwire.git"
+  },
+  "keywords": [
+    "steam",
+    "marketing",
+    "screenshot",
+    "audit",
+    "pre-commit",
+    "indie",
+    "gamedev"
+  ]
+}
