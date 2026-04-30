@@ -1,6 +1,6 @@
 {
   "name": "screenshot-tripwire",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pattern-checker for marketing image assets — catches AI-default tells (wrong Steam capsule dims, transparent corners, monochrome flat palettes, blank frames). Sibling to trailer-tripwire.",
   "license": "MIT",
   "author": "Ethan Yucetepe",
