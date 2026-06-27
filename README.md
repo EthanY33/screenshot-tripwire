@@ -1,3 +1,5 @@
+<p align="center"><img src=".github/social.png" alt="screenshot-tripwire" width="100%"></p>
+
 # screenshot-tripwire
 
 Pattern-checker for marketing image assets. Sibling to [`trailer-tripwire`](https://github.com/EthanY33/trailer-tripwire). Catches measurable AI-default tells before they ship: wrong Steam capsule dimensions, transparent corners, monochrome flat palettes, blank frames, and over-compression.
@@ -61,11 +63,11 @@ Exit codes: `0` if no CRITICAL findings, `2` if any CRITICAL.
 | `NO_HUE` | CRITICAL | Image is grey/black/white only (zero hue families above noise) |
 | `TOO_DARK` / `TOO_BRIGHT` | CRITICAL | Mean luminance < 0.04 or > 0.96 (effectively blank) |
 | `DECODE_FAIL` | CRITICAL | pngjs/jpeg-js decode failed |
-| `MONOCHROME_FLAT` | WARN | 1 hue family + flat tonality — common AI mood-board tell |
-| `FLAT_TONALITY` | WARN | p05–p95 luminance spread < 0.05 |
+| `MONOCHROME_FLAT` | WARN | 1 hue family + flat tonality (lum spread < 0.10), a common AI mood-board tell |
+| `FLAT_TONALITY` | WARN | p05-p95 luminance spread < 0.05 |
 | `OVER_COMPRESSED` | WARN | Heavy compression for resolution |
 | `ODD_ASPECT` | WARN | Not 16:9 / 4:3 / 1:1 / 21:9 (when no Steam slot match) |
-| `LOW_HUE_DIVERSITY` | NOTE | 1–2 hue families on a brand-cohesive image (informational) |
+| `LOW_HUE_DIVERSITY` | NOTE | 1-2 hue families on a brand-cohesive image (informational) |
 
 ### Recognized Steam asset slots
 
@@ -78,14 +80,14 @@ Filename is matched against patterns to detect which Steam asset slot the image 
 | `capsule_vertical*` / `*_capsule_vertical` | vertical capsule | 374×448 |
 | `library_hero*` / `*_library_hero` | library hero | 3840×1240 |
 | `library_logo*` / `*_library_logo` | library logo | 1280×720 |
-| `screenshot_*` / `*_screenshot_*` / `screen_cap*` | Steam screenshot | 1920×1080 |
+| `screenshot_<n>` / `*_screenshot_<n>` / `screen_cap*` | Steam screenshot | 1920×1080 |
 | `page_bg*` / `page_background*` | page background | (any) |
 
 ## Pre-commit hook
 
 The `install-hooks` command writes a `.git/hooks/pre-commit` that audits any staged `.png` / `.jpg` / `.jpeg` files under `brand/goneidle-landing/` and blocks the commit on any CRITICAL finding.
 
-The hook is marked with `# screenshot-tripwire:v1` and is **idempotent** — re-running the installer replaces its own hook. It also **composes with `# trailer-tripwire:v1`** if already present (both run on commit). It **refuses to overwrite** an unrelated pre-commit hook.
+The hook is marked with `# screenshot-tripwire:v1` and is **idempotent**: re-running the installer replaces its own hook. It also **composes with `# trailer-tripwire:v1`** if already present (both run on commit). It **refuses to overwrite** an unrelated pre-commit hook.
 
 To bypass on a one-off: `git commit --no-verify` and document why in the message.
 
@@ -95,7 +97,7 @@ Heuristics live in `lib/audit.mjs`. Tune thresholds when:
 - A real, intentionally-cohesive brand asset trips a CRITICAL → downgrade to WARN
 - A bad asset slips through → tighten threshold OR add a new heuristic with a new code
 
-The Steam asset slot detector is opinionated — adapt the patterns to match your filename conventions.
+The Steam asset slot detector is opinionated. Adapt the patterns to match your filename conventions.
 
 ## Roadmap
 
@@ -106,4 +108,4 @@ The Steam asset slot detector is opinionated — adapt the patterns to match you
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
