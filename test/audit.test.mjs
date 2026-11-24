@@ -10,12 +10,17 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, writeFile, rm, symlink, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { PNG } from "pngjs";
 
 import { auditFile } from "../lib/audit.mjs";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const LIB = path.resolve(HERE, "..", "lib");
 
 // --- helpers ---------------------------------------------------------------
 
@@ -252,6 +257,28 @@ test("varied colorful image produces no CRITICAL findings", async () => {
   const report = await auditFile(fp);
   const criticals = report.findings.filter(f => f.level === "CRITICAL");
   assert.equal(criticals.length, 0, `expected zero CRITICAL findings, got ${JSON.stringify(criticals)}`);
+});
+
+// --- direct invocation through a linked path --------------------------------
+
+test("lib/audit.mjs runs when invoked through a symlinked or junctioned directory", async () => {
+  // A junction needs no privilege on Windows; elsewhere the type is ignored
+  // and a plain directory symlink is made. The link gets its own tmpdir and is
+  // unlinked on its own, so nothing ever recurses through it into lib/.
+  const dir = await mkdtemp(path.join(tmpdir(), "st-link-"));
+  const link = path.join(dir, "lib-link");
+  const tiny = path.join(dir, "tiny.png");
+  await writeFile(tiny, Buffer.from("not a png"));
+  await symlink(LIB, link, "junction");
+  let r;
+  try {
+    r = spawnSync(process.execPath, [path.join(link, "audit.mjs"), tiny], { encoding: "utf8" });
+  } finally {
+    await unlink(link);
+  }
+  await rm(dir, { recursive: true, force: true });
+  assert.equal(r.status, 2, `expected exit 2 through the link, got ${r.status}: ${r.stdout}${r.stderr}`);
+  assert.match(r.stdout, /TINY_FILE/);
 });
 
 // --- teardown --------------------------------------------------------------
