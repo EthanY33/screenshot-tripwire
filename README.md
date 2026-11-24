@@ -32,7 +32,7 @@ npx screenshot-tripwire audit --json path/to/cover.png
 # Audit everything currently staged under brand/goneidle-landing/
 npx screenshot-tripwire check
 
-# Install pre-commit hook (composes with trailer-tripwire if already installed)
+# Install pre-commit hook (shares the hook with trailer-tripwire and copy-tripwire)
 npx screenshot-tripwire install-hooks
 
 # Short alias
@@ -87,9 +87,9 @@ The library logo is the one slot Steam wants on a transparent background, so `li
 
 ## Pre-commit hook
 
-The `install-hooks` command writes a `.git/hooks/pre-commit` that audits any staged `.png` / `.jpg` / `.jpeg` files under `brand/goneidle-landing/` and blocks the commit on any CRITICAL finding.
+The `install-hooks` command writes the `pre-commit` hook in the directory git actually uses (`git rev-parse --git-path hooks`, so `core.hooksPath` and linked worktrees work) that audits any staged `.png` / `.jpg` / `.jpeg` files under `brand/goneidle-landing/` and blocks the commit on any CRITICAL finding.
 
-The hook is marked with `# screenshot-tripwire:v1` and is **idempotent**: re-running the installer replaces its own hook. It also **composes with `# trailer-tripwire:v1`** if already present (both run on commit). It **refuses to overwrite** an unrelated pre-commit hook.
+The gate is a managed block between `# screenshot-tripwire:v1` and `# screenshot-tripwire:v1 end`, running `npx --no -- screenshot-tripwire check || exit $?`. `--no` stops npx from downloading anything from the registry, and `|| exit $?` blocks the commit even when the hook has no `set -e`. The installer is **idempotent** and rewrites only the lines between its own markers. Blocks from `trailer-tripwire` and `copy-tripwire` live in the same file and are never touched, in any install order. Old single-tool and composed hooks written by earlier versions are migrated with every gate they had. It **refuses to modify** an unrelated pre-commit hook and prints the block to add by hand.
 
 To bypass on a one-off: `git commit --no-verify` and document why in the message.
 
