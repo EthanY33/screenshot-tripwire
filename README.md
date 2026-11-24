@@ -59,7 +59,7 @@ Exit codes: `0` if no CRITICAL findings, `2` if any CRITICAL.
 |---|---|---|
 | `TINY_FILE` | CRITICAL | <5 KB → empty/corrupted |
 | `STEAM_DIMS` | CRITICAL | Filename matches a Steam asset slot but dims aren't canonical OR @2x |
-| `TRANSPARENT_CORNER` | CRITICAL | Any of 4 corners has alpha < 255 (Steam rejects RGBA marketing assets) |
+| `TRANSPARENT_CORNER` | CRITICAL | Any of 4 corners has alpha < 255 (Steam rejects RGBA marketing assets). Not applied to `library_logo*` |
 | `NO_HUE` | CRITICAL | Image is grey/black/white only (zero hue families above noise) |
 | `TOO_DARK` / `TOO_BRIGHT` | CRITICAL | Mean luminance < 0.04 or > 0.96 (effectively blank) |
 | `DECODE_FAIL` | CRITICAL | pngjs/jpeg-js decode failed, or a PNG is over the 64 MP decode limit |
@@ -82,6 +82,8 @@ Filename is matched against patterns to detect which Steam asset slot the image 
 | `library_logo*` / `*_library_logo` | library logo | 1280×720 |
 | `screenshot_<n>` / `*_screenshot_<n>` / `screen_cap*` | Steam screenshot | 1920×1080 |
 | `page_bg*` / `page_background*` | page background | (any) |
+
+The library logo is the one slot Steam wants on a transparent background, so `library_logo*` is exempt from `TRANSPARENT_CORNER`. When such a file has transparent pixels, the color and luminance checks (`NO_HUE`, `TOO_DARK`, `TOO_BRIGHT`, `MONOCHROME_FLAT`, `FLAT_TONALITY`, `LOW_HUE_DIVERSITY`) are skipped too, because a white, black or one-color logo is valid. A fully transparent logo is still CRITICAL (`NO_HUE`). Every other slot keeps all checks.
 
 ## Pre-commit hook
 

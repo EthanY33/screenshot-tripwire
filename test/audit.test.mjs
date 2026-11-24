@@ -118,6 +118,90 @@ test("TRANSPARENT_CORNER reports ALL transparent corners, not just first", async
   assert.match(f.msg, /BL@/);
 });
 
+test("TRANSPARENT_CORNER still fires on every Steam slot that must be opaque", async () => {
+  // Only the library logo may have a transparent background. STEAM_DIMS may
+  // also fire on some of these sizes; only the corner finding matters here.
+  const slots = [
+    ["capsule_header_alpha.png", 460, 215],
+    ["capsule_main_alpha.png", 616, 353],
+    ["capsule_vertical_alpha.png", 374, 448],
+    ["library_hero_alpha.png", 800, 800],
+    ["page_bg_alpha.png", 800, 800],
+    ["screenshot_1_alpha.png", 800, 800],
+  ];
+  for (const [name, w, h] of slots) {
+    const buf = makePng(w, h, (x, y, r) => {
+      if (x === 0 && y === 0) return [0, 0, 0, 0];
+      const n = (r() * 60) | 0;
+      return [clamp(80 + n, 0, 255), clamp(120 + n, 0, 255), clamp(200 + n, 0, 255), 255];
+    });
+    const fp = path.join(TMP, name);
+    await writeFile(fp, buf);
+    const report = await auditFile(fp);
+    assert.ok(findingCodes(report).includes("TRANSPARENT_CORNER"), `${name}: expected TRANSPARENT_CORNER, got ${JSON.stringify(report.findings)}`);
+  }
+});
+
+// --- library logo (the one slot with a transparent background) ---------------
+
+// 1280x720 logo canvas: a noisy 480x280 block of `ink` in the middle, fully
+// transparent everywhere else, with `hidden` as the RGB under the transparency.
+function logoPng(ink, hidden) {
+  return makePng(1280, 720, (x, y, r) => {
+    const inLogo = x >= 400 && x < 880 && y >= 220 && y < 500;
+    if (!inLogo) return [hidden, hidden, hidden, 0];
+    const v = clamp(ink + ((r() * 20) | 0), 0, 255);
+    return [v, v, v, 255];
+  });
+}
+
+const COLOR_CODES = ["NO_HUE", "TOO_DARK", "TOO_BRIGHT", "MONOCHROME_FLAT", "FLAT_TONALITY", "LOW_HUE_DIVERSITY"];
+
+test("library_logo on a transparent background is not blocked (white or black logo)", async () => {
+  // A white logo over white hidden RGB used to get TRANSPARENT_CORNER, NO_HUE
+  // and TOO_BRIGHT; a black one over black hidden RGB got TOO_DARK instead.
+  const cases = [
+    ["library_logo.png", 236, 255],
+    ["library_logo_black.png", 0, 0],
+  ];
+  for (const [name, ink, hidden] of cases) {
+    const fp = path.join(TMP, name);
+    await writeFile(fp, logoPng(ink, hidden));
+    const report = await auditFile(fp);
+    const codes = findingCodes(report);
+    const criticals = report.findings.filter(f => f.level === "CRITICAL");
+    assert.equal(criticals.length, 0, `${name}: expected zero CRITICAL findings, got ${JSON.stringify(criticals)}`);
+    assert.ok(!codes.includes("TRANSPARENT_CORNER"), `${name}: library logo must be exempt from TRANSPARENT_CORNER`);
+    for (const c of COLOR_CODES) assert.ok(!codes.includes(c), `${name}: ${c} must not fire on a logo with a transparent background`);
+  }
+});
+
+test("library_logo with no visible pixels is still CRITICAL", async () => {
+  // Fully transparent, with noisy RGB hidden under the alpha so the file
+  // clears the TINY_FILE gate and the hidden color cannot trip NO_HUE itself.
+  const buf = makePng(1280, 720, (x, y, r) => [(r() * 256) | 0, (r() * 256) | 0, (r() * 256) | 0, 0]);
+  const fp = path.join(TMP, "library_logo_blank.png");
+  await writeFile(fp, buf);
+  const report = await auditFile(fp);
+  const f = report.findings.find(x => x.level === "CRITICAL" && /no visible pixels/.test(x.msg));
+  assert.ok(f, `expected a CRITICAL "no visible pixels" finding, got ${JSON.stringify(report.findings)}`);
+  assert.equal(f.code, "NO_HUE");
+});
+
+test("an opaque library_logo is still judged as a full frame", async () => {
+  // No transparency at all: the blank-frame checks apply as for any asset.
+  const buf = makePng(1280, 720, (x, y, r) => {
+    const v = clamp(248 + ((r() * 8) | 0), 0, 255);
+    return [v, v, v, 255];
+  });
+  const fp = path.join(TMP, "library_logo_opaque_white.png");
+  await writeFile(fp, buf);
+  const report = await auditFile(fp);
+  const codes = findingCodes(report);
+  assert.ok(codes.includes("TOO_BRIGHT"), `expected TOO_BRIGHT, got ${JSON.stringify(report.findings)}`);
+  assert.ok(codes.includes("NO_HUE"), `expected NO_HUE, got ${JSON.stringify(report.findings)}`);
+});
+
 // --- STEAM_DIMS ------------------------------------------------------------
 
 test("STEAM_DIMS fires when filename matches a slot but dims are wrong", async () => {
