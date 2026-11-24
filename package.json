@@ -24,7 +24,7 @@
     "jpeg-js": "^0.4.4"
   },
   "scripts": {
-    "test": "node --test test/audit.test.mjs"
+    "test": "node --test test/audit.test.mjs test/check.test.mjs"
   },
   "repository": {
     "type": "git",

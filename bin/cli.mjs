@@ -50,4 +50,6 @@ if (!script) {
 const child = spawn(process.execPath, [path.join(LIB, script), ...rest], {
   stdio: "inherit",
 });
-child.on("exit", (code) => process.exit(code ?? 0));
+// A child killed by a signal reports code null: fail closed, never exit 0.
+child.on("error", (e) => { console.error(`screenshot-tripwire: failed to run ${cmd}: ${e.message}`); process.exit(1); });
+child.on("exit", (code) => process.exit(code ?? 1));

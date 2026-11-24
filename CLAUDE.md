@@ -6,10 +6,10 @@ Node CLI: pre-commit gate for marketing image assets. Sibling of `trailer-tripwi
 ```
 npx screenshot-tripwire audit <files...>     # exit 2 on CRITICAL
 npx screenshot-tripwire audit --json <...>   # machine-readable
-npx screenshot-tripwire check                # staged images under brand/goneidle-landing/ ONLY (prefix hard-coded in lib/check.mjs)
+npx screenshot-tripwire check                # staged blobs (index content, not working tree) under brand/goneidle-landing/ ONLY (prefix hard-coded in lib/check.mjs); any internal error exits 1
 npx screenshot-tripwire install-hooks        # idempotent pre-commit hook
 npx st audit <file>                          # short alias
-npm test                                     # node --test test/audit.test.mjs (also CI: .github/workflows/test.yml)
+npm test                                     # node --test test/audit.test.mjs test/check.test.mjs (also CI: .github/workflows/test.yml)
 ```
 
 ## Heuristic codes
