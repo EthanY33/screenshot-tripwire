@@ -14,7 +14,8 @@ import { spawnSync } from "node:child_process";
 import { mkdtemp, writeFile, rm, symlink, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { deflateSync } from "node:zlib";
 import { PNG } from "pngjs";
 
 import { auditFile } from "../lib/audit.mjs";
@@ -258,6 +259,127 @@ test("varied colorful image produces no CRITICAL findings", async () => {
   const report = await auditFile(fp);
   const criticals = report.findings.filter(f => f.level === "CRITICAL");
   assert.equal(criticals.length, 0, `expected zero CRITICAL findings, got ${JSON.stringify(criticals)}`);
+});
+
+// --- PNG decode limits -----------------------------------------------------
+//
+// These PNGs are built by hand: pngjs cannot write interlaced files, and
+// writing a 144 MP image through it would need half a gigabyte.
+
+const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c >>> 0;
+});
+
+function crc32(buf) {
+  let c = 0xffffffff;
+  for (const b of buf) c = CRC_TABLE[(c ^ b) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type, data) {
+  const body = Buffer.concat([Buffer.from(type, "latin1"), data]);
+  const out = Buffer.alloc(body.length + 8);
+  out.writeUInt32BE(data.length, 0);
+  body.copy(out, 4);
+  out.writeUInt32BE(crc32(body), body.length + 4);
+  return out;
+}
+
+// Build a PNG from scanline bytes that already carry their filter bytes.
+// `pad` adds an ancillary chunk of that many bytes so a small image still
+// clears the 5 KB TINY_FILE gate and reaches the decoder.
+function rawPng({ width, height, depth, colorType, interlace = 0 }, raw, pad = 0) {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = depth;
+  ihdr[9] = colorType;
+  ihdr[12] = interlace;
+  const chunks = [PNG_SIG, pngChunk("IHDR", ihdr)];
+  if (pad > 0) chunks.push(pngChunk("teSt", Buffer.alloc(pad, 0x41)));
+  chunks.push(pngChunk("IDAT", deflateSync(raw)), pngChunk("IEND", Buffer.alloc(0)));
+  return Buffer.concat(chunks);
+}
+
+// Exact size of Adam7 interlaced scanline data: per pass, one filter byte plus
+// the packed row, for every row.
+function adam7RawSize(width, height, bitsPerPixel) {
+  const xs = [0, 4, 0, 2, 0, 1, 0], ys = [0, 0, 4, 0, 2, 0, 1];
+  const dx = [8, 8, 4, 4, 2, 2, 1], dy = [8, 8, 8, 4, 4, 2, 2];
+  let total = 0;
+  for (let p = 0; p < 7; p++) {
+    const pw = Math.ceil((width - xs[p]) / dx[p]);
+    const ph = Math.ceil((height - ys[p]) / dy[p]);
+    if (pw > 0 && ph > 0) total += ph * (1 + Math.ceil((pw * bitsPerPixel) / 8));
+  }
+  return total;
+}
+
+// Audit one file in a fresh process and report that process's peak memory.
+function auditInChild(fp) {
+  const script = [
+    `import { auditFile } from ${JSON.stringify(pathToFileURL(path.join(LIB, "audit.mjs")).href)};`,
+    "const report = await auditFile(process.argv[1]);",
+    "console.log(JSON.stringify({ report, maxRssMb: process.resourceUsage().maxRSS / 1024 }));",
+  ].join("\n");
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", script, fp], { encoding: "utf8" });
+  assert.equal(r.status, 0, `child audit failed: ${r.stderr}`);
+  return JSON.parse(r.stdout);
+}
+
+test("DECODE_FAIL refuses a PNG over the pixel limit before decoding it", async () => {
+  // 12000x12000 (144 MP) 1-bit greyscale, all zero: about 18 KB on disk, but
+  // pngjs would allocate width*height*4 = 576 MB to decode it.
+  const width = 12000, height = 12000;
+  const raw = Buffer.alloc(height * (1 + width / 8));
+  const fp = path.join(TMP, "huge_dims.png");
+  await writeFile(fp, rawPng({ width, height, depth: 1, colorType: 0 }, raw));
+  const { report, maxRssMb } = auditInChild(fp);
+  const f = report.findings.find(x => x.code === "DECODE_FAIL");
+  assert.ok(f, `expected DECODE_FAIL, got ${JSON.stringify(report.findings)}`);
+  assert.match(f.msg, /12000x12000/);
+  assert.match(f.msg, /limit/);
+  assert.equal(report.width, undefined, "image must not have been decoded");
+  assert.ok(maxRssMb < 300, `peak RSS ${maxRssMb.toFixed(0)} MB, expected under 300 MB`);
+});
+
+test("DECODE_FAIL refuses an interlaced PNG whose data inflates past its declared size", async () => {
+  // Declares 8x8 RGBA (a few hundred bytes of scanlines) but carries 64 MB.
+  const fp = path.join(TMP, "interlaced_bomb.png");
+  await writeFile(fp, rawPng({ width: 8, height: 8, depth: 8, colorType: 6, interlace: 1 }, Buffer.alloc(64 * 1024 * 1024)));
+  const { report, maxRssMb } = auditInChild(fp);
+  const f = report.findings.find(x => x.code === "DECODE_FAIL");
+  assert.ok(f, `expected DECODE_FAIL, got ${JSON.stringify(report.findings)}`);
+  assert.match(f.msg, /interlaced/);
+  assert.match(f.msg, /inflates past/);
+  assert.ok(maxRssMb < 300, `peak RSS ${maxRssMb.toFixed(0)} MB, expected under 300 MB`);
+});
+
+test("valid interlaced PNGs of awkward sizes and bit depths still decode", async () => {
+  const channels = { 0: 1, 2: 3, 4: 2, 6: 4 };
+  const cases = [
+    { width: 1,   height: 1,   depth: 1,  colorType: 0 },
+    { width: 3,   height: 5,   depth: 1,  colorType: 0 },
+    { width: 9,   height: 9,   depth: 2,  colorType: 0 },
+    { width: 33,  height: 17,  depth: 4,  colorType: 0 },
+    { width: 13,  height: 3,   depth: 8,  colorType: 2 },
+    { width: 7,   height: 13,  depth: 16, colorType: 4 },
+    { width: 5,   height: 5,   depth: 16, colorType: 6 },
+    { width: 600, height: 600, depth: 8,  colorType: 6 },
+  ];
+  for (const c of cases) {
+    const raw = Buffer.alloc(adam7RawSize(c.width, c.height, c.depth * channels[c.colorType]));
+    const label = `${c.width}x${c.height} depth ${c.depth} type ${c.colorType}`;
+    const fp = path.join(TMP, `interlaced_${c.width}x${c.height}_${c.depth}_${c.colorType}.png`);
+    await writeFile(fp, rawPng({ ...c, interlace: 1 }, raw, 6000));
+    const report = await auditFile(fp);
+    assert.ok(!findingCodes(report).includes("DECODE_FAIL"), `${label}: unexpected DECODE_FAIL ${JSON.stringify(report.findings)}`);
+    assert.equal(report.width, c.width, label);
+    assert.equal(report.height, c.height, label);
+  }
 });
 
 // --- audit argument parsing ------------------------------------------------
