@@ -21,6 +21,7 @@ import { auditFile } from "../lib/audit.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const LIB = path.resolve(HERE, "..", "lib");
+const CLI = path.resolve(HERE, "..", "bin", "cli.mjs");
 
 // --- helpers ---------------------------------------------------------------
 
@@ -257,6 +258,41 @@ test("varied colorful image produces no CRITICAL findings", async () => {
   const report = await auditFile(fp);
   const criticals = report.findings.filter(f => f.level === "CRITICAL");
   assert.equal(criticals.length, 0, `expected zero CRITICAL findings, got ${JSON.stringify(criticals)}`);
+});
+
+// --- audit argument parsing ------------------------------------------------
+
+function runAudit(cwd, args) {
+  return spawnSync(process.execPath, [CLI, "audit", ...args], { cwd, encoding: "utf8" });
+}
+
+test("audit treats arguments after -- as files, even when they start with --", async () => {
+  await writeFile(path.join(TMP, "--bad.png"), Buffer.from("junk"));
+  const r = runAudit(TMP, ["--", "--bad.png"]);
+  assert.equal(r.status, 2, `expected exit 2, got ${r.status}: ${r.stdout}${r.stderr}`);
+  assert.match(r.stdout, /--bad\.png/);
+  assert.match(r.stdout, /TINY_FILE/);
+  assert.match(r.stdout, /1 file\(s\) audited/);
+});
+
+test("audit rejects an unknown option instead of ignoring it", async () => {
+  await writeFile(path.join(TMP, "x.png"), Buffer.from("junk"));
+  const r = runAudit(TMP, ["--jsno", "x.png"]);
+  assert.equal(r.status, 64, `expected exit 64, got ${r.status}: ${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /--jsno/);
+  assert.doesNotMatch(r.stdout, /audited/);
+});
+
+test("audit --json still works before or after the file list", async () => {
+  const buf = makePng(600, 600, (x, y, r) => [(r() * 256) | 0, (r() * 256) | 0, (r() * 256) | 0, 255]);
+  await writeFile(path.join(TMP, "good.png"), buf);
+  for (const args of [["--json", "good.png"], ["good.png", "--json"]]) {
+    const r = runAudit(TMP, args);
+    assert.equal(r.status, 0, `expected exit 0 for ${args.join(" ")}, got ${r.status}: ${r.stdout}${r.stderr}`);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.reports.length, 1);
+    assert.equal(out.totalCritical, 0);
+  }
 });
 
 // --- direct invocation through a linked path --------------------------------
