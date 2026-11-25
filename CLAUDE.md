@@ -13,7 +13,7 @@ npm test                                     # node --test over test/*.test.mjs 
 ```
 
 ## Heuristic codes
-- CRITICAL: `TINY_FILE` (<5 KB), `STEAM_DIMS` (filename matches a slot but dims aren't canonical or @2x), `TRANSPARENT_CORNER` (any corner alpha < 255; Steam silently rejects; `library_logo*` exempt), `NO_HUE` (grey/black/white only), `TOO_DARK` (mean luminance < 0.04), `TOO_BRIGHT` (> 0.96), `DECODE_FAIL` (decoder error, or a PNG over the 64 MP decode limit or the decode memory budget, which 16-bit PNGs hit first).
+- CRITICAL: `TINY_FILE` (<5 KB), `STEAM_DIMS` (filename matches a slot but dims aren't canonical or @2x), `TRANSPARENT_CORNER` (any corner alpha < 255; Steam silently rejects; `library_logo*` exempt), `NO_HUE` (grey/black/white only), `TOO_DARK` (mean luminance < 0.04), `TOO_BRIGHT` (> 0.96), `DECODE_FAIL` (decoder error, or a PNG over the 64 MP decode limit or the decode memory budget, which 16-bit PNGs hit first, or a PNG with a side of 0 or over 65,535 px).
 - WARN: `MONOCHROME_FLAT` (1 hue family + flat tonality, the AI mood-board tell), `FLAT_TONALITY` (p05-p95 luminance < 0.05), `OVER_COMPRESSED`, `ODD_ASPECT` (no Steam slot match).
 - NOTE: `LOW_HUE_DIVERSITY` (1-2 hue families on an otherwise-cohesive image; informational only).
 

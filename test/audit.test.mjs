@@ -444,6 +444,36 @@ test("DECODE_FAIL refuses a 16-bit PNG whose decode memory is over budget", asyn
   assert.ok(maxRssMb < 300, `peak RSS ${maxRssMb.toFixed(0)} MB, expected under 300 MB`);
 });
 
+test("DECODE_FAIL refuses a PNG with a zero or oversized side before decoding it", async () => {
+  // pngjs keeps a Buffer object per scanline, so row count costs memory on its
+  // own: a 1-pixel-wide image with millions of rows stays far under the pixel
+  // cap, and a zero width makes the pixel count 0 for any height.
+  const cases = [
+    { name: "tall_narrow.png", header: { width: 1, height: 2_000_000, depth: 8, colorType: 0 }, rawBytes: 4_000_000 },
+    { name: "zero_width.png",  header: { width: 0, height: 4_000_000, depth: 8, colorType: 0 }, rawBytes: 4_000_000 },
+    { name: "zero_width_interlaced.png", header: { width: 0, height: 100_000_000, depth: 8, colorType: 6, interlace: 1 }, rawBytes: 64 * 1024 * 1024 },
+  ];
+  for (const c of cases) {
+    const fp = path.join(TMP, c.name);
+    await writeFile(fp, rawPng(c.header, Buffer.alloc(c.rawBytes), 6000));
+    const { report, maxRssMb } = auditInChild(fp);
+    const f = report.findings.find(x => x.code === "DECODE_FAIL");
+    assert.ok(f, `${c.name}: expected DECODE_FAIL, got ${JSON.stringify(report.findings)}`);
+    assert.match(f.msg, new RegExp(`${c.header.width}x${c.header.height}`), c.name);
+    assert.match(f.msg, /each side/, c.name);
+    assert.equal(report.width, undefined, `${c.name}: image must not have been decoded`);
+    assert.ok(maxRssMb < 300, `${c.name}: peak RSS ${maxRssMb.toFixed(0)} MB, expected under 300 MB`);
+  }
+});
+
+test("a PNG at the side limit still decodes", async () => {
+  const fp = path.join(TMP, "side_limit.png");
+  await writeFile(fp, rawPng({ width: 8, height: 65_535, depth: 8, colorType: 0 }, Buffer.alloc(65_535 * 9), 6000));
+  const report = await auditFile(fp);
+  assert.ok(!findingCodes(report).includes("DECODE_FAIL"), `unexpected DECODE_FAIL ${JSON.stringify(report.findings)}`);
+  assert.equal(report.height, 65_535);
+});
+
 test("DECODE_FAIL refuses an interlaced PNG whose data inflates past its declared size", async () => {
   // Declares 8x8 RGBA (a few hundred bytes of scanlines) but carries 64 MB.
   const fp = path.join(TMP, "interlaced_bomb.png");
