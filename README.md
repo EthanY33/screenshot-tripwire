@@ -62,7 +62,7 @@ Exit codes: `0` if no CRITICAL findings, `2` if any CRITICAL.
 | `TRANSPARENT_CORNER` | CRITICAL | Any of 4 corners has alpha < 255 (Steam rejects RGBA marketing assets). Not applied to `library_logo*` |
 | `NO_HUE` | CRITICAL | Image is grey/black/white only (zero hue families above noise) |
 | `TOO_DARK` / `TOO_BRIGHT` | CRITICAL | Mean luminance < 0.04 or > 0.96 (effectively blank) |
-| `DECODE_FAIL` | CRITICAL | pngjs/jpeg-js decode failed, or a PNG is over the 64 MP decode limit |
+| `DECODE_FAIL` | CRITICAL | pngjs/jpeg-js decode failed, or a PNG is over the 64 MP decode limit or the decode memory budget (16-bit PNGs hit it first) |
 | `MONOCHROME_FLAT` | WARN | 1 hue family + flat tonality (lum spread < 0.10), a common AI mood-board tell |
 | `FLAT_TONALITY` | WARN | p05-p95 luminance spread < 0.05 |
 | `OVER_COMPRESSED` | WARN | Heavy compression for resolution |

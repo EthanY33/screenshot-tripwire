@@ -430,6 +430,20 @@ test("DECODE_FAIL refuses a PNG over the pixel limit before decoding it", async 
   assert.ok(maxRssMb < 300, `peak RSS ${maxRssMb.toFixed(0)} MB, expected under 300 MB`);
 });
 
+test("DECODE_FAIL refuses a 16-bit PNG whose decode memory is over budget", async () => {
+  // 8000x8000 (64 MP) 16-bit greyscale, all zero: 124 KB on disk, but pngjs
+  // needs about 900 MB to decode it even though it is within the pixel cap.
+  const fp = path.join(TMP, "deep_dims.png");
+  await writeFile(fp, rawPng({ width: 8000, height: 8000, depth: 16, colorType: 0 }, Buffer.alloc(8000 * 16001)));
+  const { report, maxRssMb } = auditInChild(fp);
+  const f = report.findings.find(x => x.code === "DECODE_FAIL");
+  assert.ok(f, `expected DECODE_FAIL, got ${JSON.stringify(report.findings)}`);
+  assert.match(f.msg, /8000x8000 at 16 bits/);
+  assert.match(f.msg, /memory limit/);
+  assert.equal(report.width, undefined, "image must not have been decoded");
+  assert.ok(maxRssMb < 300, `peak RSS ${maxRssMb.toFixed(0)} MB, expected under 300 MB`);
+});
+
 test("DECODE_FAIL refuses an interlaced PNG whose data inflates past its declared size", async () => {
   // Declares 8x8 RGBA (a few hundred bytes of scanlines) but carries 64 MB.
   const fp = path.join(TMP, "interlaced_bomb.png");
