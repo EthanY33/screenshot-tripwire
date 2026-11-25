@@ -32,7 +32,7 @@ npx screenshot-tripwire audit --json path/to/cover.png
 # Audit everything currently staged under brand/goneidle-landing/
 npx screenshot-tripwire check
 
-# Install pre-commit hook (composes with trailer-tripwire if already installed)
+# Install pre-commit hook (shares the hook with trailer-tripwire and copy-tripwire)
 npx screenshot-tripwire install-hooks
 
 # Short alias
@@ -59,10 +59,10 @@ Exit codes: `0` if no CRITICAL findings, `2` if any CRITICAL.
 |---|---|---|
 | `TINY_FILE` | CRITICAL | <5 KB → empty/corrupted |
 | `STEAM_DIMS` | CRITICAL | Filename matches a Steam asset slot but dims aren't canonical OR @2x |
-| `TRANSPARENT_CORNER` | CRITICAL | Any of 4 corners has alpha < 255 (Steam rejects RGBA marketing assets) |
+| `TRANSPARENT_CORNER` | CRITICAL | Any of 4 corners has alpha < 255 (Steam rejects RGBA marketing assets). Not applied to `library_logo*` |
 | `NO_HUE` | CRITICAL | Image is grey/black/white only (zero hue families above noise) |
 | `TOO_DARK` / `TOO_BRIGHT` | CRITICAL | Mean luminance < 0.04 or > 0.96 (effectively blank) |
-| `DECODE_FAIL` | CRITICAL | pngjs/jpeg-js decode failed |
+| `DECODE_FAIL` | CRITICAL | pngjs/jpeg-js decode failed, or a PNG is over the 64 MP decode limit or the decode memory budget (16-bit PNGs hit it first), or has a side of 0 or over 65,535 px |
 | `MONOCHROME_FLAT` | WARN | 1 hue family + flat tonality (lum spread < 0.10), a common AI mood-board tell |
 | `FLAT_TONALITY` | WARN | p05-p95 luminance spread < 0.05 |
 | `OVER_COMPRESSED` | WARN | Heavy compression for resolution |
@@ -83,11 +83,13 @@ Filename is matched against patterns to detect which Steam asset slot the image 
 | `screenshot_<n>` / `*_screenshot_<n>` / `screen_cap*` | Steam screenshot | 1920×1080 |
 | `page_bg*` / `page_background*` | page background | (any) |
 
+The library logo is the one slot Steam wants on a transparent background, so `library_logo*` is exempt from `TRANSPARENT_CORNER`. When such a file has transparent pixels, the color and luminance checks (`NO_HUE`, `TOO_DARK`, `TOO_BRIGHT`, `MONOCHROME_FLAT`, `FLAT_TONALITY`, `LOW_HUE_DIVERSITY`) are skipped too, because a white, black or one-color logo is valid. A fully transparent logo is still CRITICAL (`NO_HUE`). Every other slot keeps all checks.
+
 ## Pre-commit hook
 
-The `install-hooks` command writes a `.git/hooks/pre-commit` that audits any staged `.png` / `.jpg` / `.jpeg` files under `brand/goneidle-landing/` and blocks the commit on any CRITICAL finding.
+The `install-hooks` command writes the `pre-commit` hook in the directory git actually uses (`git rev-parse --git-path hooks`, so `core.hooksPath` and linked worktrees work) that audits any staged `.png` / `.jpg` / `.jpeg` files under `brand/goneidle-landing/` and blocks the commit on any CRITICAL finding.
 
-The hook is marked with `# screenshot-tripwire:v1` and is **idempotent**: re-running the installer replaces its own hook. It also **composes with `# trailer-tripwire:v1`** if already present (both run on commit). It **refuses to overwrite** an unrelated pre-commit hook.
+The gate is a managed block between `# screenshot-tripwire:v1` and `# screenshot-tripwire:v1 end`, running `npx --no -- screenshot-tripwire check || exit $?`. `--no` stops npx from downloading anything from the registry, and `|| exit $?` blocks the commit even when the hook has no `set -e`. The installer is **idempotent** and rewrites only the lines between its own markers. Blocks from `trailer-tripwire` and `copy-tripwire` live in the same file and are never touched, in any install order. Old single-tool and composed hooks written by earlier versions are migrated with every gate they had. It **refuses to modify** an unrelated pre-commit hook and prints the block to add by hand.
 
 To bypass on a one-off: `git commit --no-verify` and document why in the message.
 

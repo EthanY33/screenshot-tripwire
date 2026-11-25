@@ -10,12 +10,19 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, writeFile, rm, symlink, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { deflateSync } from "node:zlib";
 import { PNG } from "pngjs";
 
 import { auditFile } from "../lib/audit.mjs";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const LIB = path.resolve(HERE, "..", "lib");
+const CLI = path.resolve(HERE, "..", "bin", "cli.mjs");
 
 // --- helpers ---------------------------------------------------------------
 
@@ -109,6 +116,90 @@ test("TRANSPARENT_CORNER reports ALL transparent corners, not just first", async
   assert.match(f.msg, /TL@/);
   assert.match(f.msg, /TR@/);
   assert.match(f.msg, /BL@/);
+});
+
+test("TRANSPARENT_CORNER still fires on every Steam slot that must be opaque", async () => {
+  // Only the library logo may have a transparent background. STEAM_DIMS may
+  // also fire on some of these sizes; only the corner finding matters here.
+  const slots = [
+    ["capsule_header_alpha.png", 460, 215],
+    ["capsule_main_alpha.png", 616, 353],
+    ["capsule_vertical_alpha.png", 374, 448],
+    ["library_hero_alpha.png", 800, 800],
+    ["page_bg_alpha.png", 800, 800],
+    ["screenshot_1_alpha.png", 800, 800],
+  ];
+  for (const [name, w, h] of slots) {
+    const buf = makePng(w, h, (x, y, r) => {
+      if (x === 0 && y === 0) return [0, 0, 0, 0];
+      const n = (r() * 60) | 0;
+      return [clamp(80 + n, 0, 255), clamp(120 + n, 0, 255), clamp(200 + n, 0, 255), 255];
+    });
+    const fp = path.join(TMP, name);
+    await writeFile(fp, buf);
+    const report = await auditFile(fp);
+    assert.ok(findingCodes(report).includes("TRANSPARENT_CORNER"), `${name}: expected TRANSPARENT_CORNER, got ${JSON.stringify(report.findings)}`);
+  }
+});
+
+// --- library logo (the one slot with a transparent background) ---------------
+
+// 1280x720 logo canvas: a noisy 480x280 block of `ink` in the middle, fully
+// transparent everywhere else, with `hidden` as the RGB under the transparency.
+function logoPng(ink, hidden) {
+  return makePng(1280, 720, (x, y, r) => {
+    const inLogo = x >= 400 && x < 880 && y >= 220 && y < 500;
+    if (!inLogo) return [hidden, hidden, hidden, 0];
+    const v = clamp(ink + ((r() * 20) | 0), 0, 255);
+    return [v, v, v, 255];
+  });
+}
+
+const COLOR_CODES = ["NO_HUE", "TOO_DARK", "TOO_BRIGHT", "MONOCHROME_FLAT", "FLAT_TONALITY", "LOW_HUE_DIVERSITY"];
+
+test("library_logo on a transparent background is not blocked (white or black logo)", async () => {
+  // A white logo over white hidden RGB used to get TRANSPARENT_CORNER, NO_HUE
+  // and TOO_BRIGHT; a black one over black hidden RGB got TOO_DARK instead.
+  const cases = [
+    ["library_logo.png", 236, 255],
+    ["library_logo_black.png", 0, 0],
+  ];
+  for (const [name, ink, hidden] of cases) {
+    const fp = path.join(TMP, name);
+    await writeFile(fp, logoPng(ink, hidden));
+    const report = await auditFile(fp);
+    const codes = findingCodes(report);
+    const criticals = report.findings.filter(f => f.level === "CRITICAL");
+    assert.equal(criticals.length, 0, `${name}: expected zero CRITICAL findings, got ${JSON.stringify(criticals)}`);
+    assert.ok(!codes.includes("TRANSPARENT_CORNER"), `${name}: library logo must be exempt from TRANSPARENT_CORNER`);
+    for (const c of COLOR_CODES) assert.ok(!codes.includes(c), `${name}: ${c} must not fire on a logo with a transparent background`);
+  }
+});
+
+test("library_logo with no visible pixels is still CRITICAL", async () => {
+  // Fully transparent, with noisy RGB hidden under the alpha so the file
+  // clears the TINY_FILE gate and the hidden color cannot trip NO_HUE itself.
+  const buf = makePng(1280, 720, (x, y, r) => [(r() * 256) | 0, (r() * 256) | 0, (r() * 256) | 0, 0]);
+  const fp = path.join(TMP, "library_logo_blank.png");
+  await writeFile(fp, buf);
+  const report = await auditFile(fp);
+  const f = report.findings.find(x => x.level === "CRITICAL" && /no visible pixels/.test(x.msg));
+  assert.ok(f, `expected a CRITICAL "no visible pixels" finding, got ${JSON.stringify(report.findings)}`);
+  assert.equal(f.code, "NO_HUE");
+});
+
+test("an opaque library_logo is still judged as a full frame", async () => {
+  // No transparency at all: the blank-frame checks apply as for any asset.
+  const buf = makePng(1280, 720, (x, y, r) => {
+    const v = clamp(248 + ((r() * 8) | 0), 0, 255);
+    return [v, v, v, 255];
+  });
+  const fp = path.join(TMP, "library_logo_opaque_white.png");
+  await writeFile(fp, buf);
+  const report = await auditFile(fp);
+  const codes = findingCodes(report);
+  assert.ok(codes.includes("TOO_BRIGHT"), `expected TOO_BRIGHT, got ${JSON.stringify(report.findings)}`);
+  assert.ok(codes.includes("NO_HUE"), `expected NO_HUE, got ${JSON.stringify(report.findings)}`);
 });
 
 // --- STEAM_DIMS ------------------------------------------------------------
@@ -252,6 +343,228 @@ test("varied colorful image produces no CRITICAL findings", async () => {
   const report = await auditFile(fp);
   const criticals = report.findings.filter(f => f.level === "CRITICAL");
   assert.equal(criticals.length, 0, `expected zero CRITICAL findings, got ${JSON.stringify(criticals)}`);
+});
+
+// --- PNG decode limits -----------------------------------------------------
+//
+// These PNGs are built by hand: pngjs cannot write interlaced files, and
+// writing a 144 MP image through it would need half a gigabyte.
+
+const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c >>> 0;
+});
+
+function crc32(buf) {
+  let c = 0xffffffff;
+  for (const b of buf) c = CRC_TABLE[(c ^ b) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type, data) {
+  const body = Buffer.concat([Buffer.from(type, "latin1"), data]);
+  const out = Buffer.alloc(body.length + 8);
+  out.writeUInt32BE(data.length, 0);
+  body.copy(out, 4);
+  out.writeUInt32BE(crc32(body), body.length + 4);
+  return out;
+}
+
+// Build a PNG from scanline bytes that already carry their filter bytes.
+// `pad` adds an ancillary chunk of that many bytes so a small image still
+// clears the 5 KB TINY_FILE gate and reaches the decoder.
+function rawPng({ width, height, depth, colorType, interlace = 0 }, raw, pad = 0) {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = depth;
+  ihdr[9] = colorType;
+  ihdr[12] = interlace;
+  const chunks = [PNG_SIG, pngChunk("IHDR", ihdr)];
+  if (pad > 0) chunks.push(pngChunk("teSt", Buffer.alloc(pad, 0x41)));
+  chunks.push(pngChunk("IDAT", deflateSync(raw)), pngChunk("IEND", Buffer.alloc(0)));
+  return Buffer.concat(chunks);
+}
+
+// Exact size of Adam7 interlaced scanline data: per pass, one filter byte plus
+// the packed row, for every row.
+function adam7RawSize(width, height, bitsPerPixel) {
+  const xs = [0, 4, 0, 2, 0, 1, 0], ys = [0, 0, 4, 0, 2, 0, 1];
+  const dx = [8, 8, 4, 4, 2, 2, 1], dy = [8, 8, 8, 4, 4, 2, 2];
+  let total = 0;
+  for (let p = 0; p < 7; p++) {
+    const pw = Math.ceil((width - xs[p]) / dx[p]);
+    const ph = Math.ceil((height - ys[p]) / dy[p]);
+    if (pw > 0 && ph > 0) total += ph * (1 + Math.ceil((pw * bitsPerPixel) / 8));
+  }
+  return total;
+}
+
+// Audit one file in a fresh process and report that process's peak memory.
+function auditInChild(fp) {
+  const script = [
+    `import { auditFile } from ${JSON.stringify(pathToFileURL(path.join(LIB, "audit.mjs")).href)};`,
+    "const report = await auditFile(process.argv[1]);",
+    "console.log(JSON.stringify({ report, maxRssMb: process.resourceUsage().maxRSS / 1024 }));",
+  ].join("\n");
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", script, fp], { encoding: "utf8" });
+  assert.equal(r.status, 0, `child audit failed: ${r.stderr}`);
+  return JSON.parse(r.stdout);
+}
+
+test("DECODE_FAIL refuses a PNG over the pixel limit before decoding it", async () => {
+  // 12000x12000 (144 MP) 1-bit greyscale, all zero: about 18 KB on disk, but
+  // pngjs would allocate width*height*4 = 576 MB to decode it.
+  const width = 12000, height = 12000;
+  const raw = Buffer.alloc(height * (1 + width / 8));
+  const fp = path.join(TMP, "huge_dims.png");
+  await writeFile(fp, rawPng({ width, height, depth: 1, colorType: 0 }, raw));
+  const { report, maxRssMb } = auditInChild(fp);
+  const f = report.findings.find(x => x.code === "DECODE_FAIL");
+  assert.ok(f, `expected DECODE_FAIL, got ${JSON.stringify(report.findings)}`);
+  assert.match(f.msg, /12000x12000/);
+  assert.match(f.msg, /limit/);
+  assert.equal(report.width, undefined, "image must not have been decoded");
+  assert.ok(maxRssMb < 300, `peak RSS ${maxRssMb.toFixed(0)} MB, expected under 300 MB`);
+});
+
+test("DECODE_FAIL refuses a 16-bit PNG whose decode memory is over budget", async () => {
+  // 8000x8000 (64 MP) 16-bit greyscale, all zero: 124 KB on disk, but pngjs
+  // needs about 900 MB to decode it even though it is within the pixel cap.
+  const fp = path.join(TMP, "deep_dims.png");
+  await writeFile(fp, rawPng({ width: 8000, height: 8000, depth: 16, colorType: 0 }, Buffer.alloc(8000 * 16001)));
+  const { report, maxRssMb } = auditInChild(fp);
+  const f = report.findings.find(x => x.code === "DECODE_FAIL");
+  assert.ok(f, `expected DECODE_FAIL, got ${JSON.stringify(report.findings)}`);
+  assert.match(f.msg, /8000x8000 at 16 bits/);
+  assert.match(f.msg, /memory limit/);
+  assert.equal(report.width, undefined, "image must not have been decoded");
+  assert.ok(maxRssMb < 300, `peak RSS ${maxRssMb.toFixed(0)} MB, expected under 300 MB`);
+});
+
+test("DECODE_FAIL refuses a PNG with a zero or oversized side before decoding it", async () => {
+  // pngjs keeps a Buffer object per scanline, so row count costs memory on its
+  // own: a 1-pixel-wide image with millions of rows stays far under the pixel
+  // cap, and a zero width makes the pixel count 0 for any height.
+  const cases = [
+    { name: "tall_narrow.png", header: { width: 1, height: 2_000_000, depth: 8, colorType: 0 }, rawBytes: 4_000_000 },
+    { name: "zero_width.png",  header: { width: 0, height: 4_000_000, depth: 8, colorType: 0 }, rawBytes: 4_000_000 },
+    { name: "zero_width_interlaced.png", header: { width: 0, height: 100_000_000, depth: 8, colorType: 6, interlace: 1 }, rawBytes: 64 * 1024 * 1024 },
+  ];
+  for (const c of cases) {
+    const fp = path.join(TMP, c.name);
+    await writeFile(fp, rawPng(c.header, Buffer.alloc(c.rawBytes), 6000));
+    const { report, maxRssMb } = auditInChild(fp);
+    const f = report.findings.find(x => x.code === "DECODE_FAIL");
+    assert.ok(f, `${c.name}: expected DECODE_FAIL, got ${JSON.stringify(report.findings)}`);
+    assert.match(f.msg, new RegExp(`${c.header.width}x${c.header.height}`), c.name);
+    assert.match(f.msg, /each side/, c.name);
+    assert.equal(report.width, undefined, `${c.name}: image must not have been decoded`);
+    assert.ok(maxRssMb < 300, `${c.name}: peak RSS ${maxRssMb.toFixed(0)} MB, expected under 300 MB`);
+  }
+});
+
+test("a PNG at the side limit still decodes", async () => {
+  const fp = path.join(TMP, "side_limit.png");
+  await writeFile(fp, rawPng({ width: 8, height: 65_535, depth: 8, colorType: 0 }, Buffer.alloc(65_535 * 9), 6000));
+  const report = await auditFile(fp);
+  assert.ok(!findingCodes(report).includes("DECODE_FAIL"), `unexpected DECODE_FAIL ${JSON.stringify(report.findings)}`);
+  assert.equal(report.height, 65_535);
+});
+
+test("DECODE_FAIL refuses an interlaced PNG whose data inflates past its declared size", async () => {
+  // Declares 8x8 RGBA (a few hundred bytes of scanlines) but carries 64 MB.
+  const fp = path.join(TMP, "interlaced_bomb.png");
+  await writeFile(fp, rawPng({ width: 8, height: 8, depth: 8, colorType: 6, interlace: 1 }, Buffer.alloc(64 * 1024 * 1024)));
+  const { report, maxRssMb } = auditInChild(fp);
+  const f = report.findings.find(x => x.code === "DECODE_FAIL");
+  assert.ok(f, `expected DECODE_FAIL, got ${JSON.stringify(report.findings)}`);
+  assert.match(f.msg, /interlaced/);
+  assert.match(f.msg, /inflates past/);
+  assert.ok(maxRssMb < 300, `peak RSS ${maxRssMb.toFixed(0)} MB, expected under 300 MB`);
+});
+
+test("valid interlaced PNGs of awkward sizes and bit depths still decode", async () => {
+  const channels = { 0: 1, 2: 3, 4: 2, 6: 4 };
+  const cases = [
+    { width: 1,   height: 1,   depth: 1,  colorType: 0 },
+    { width: 3,   height: 5,   depth: 1,  colorType: 0 },
+    { width: 9,   height: 9,   depth: 2,  colorType: 0 },
+    { width: 33,  height: 17,  depth: 4,  colorType: 0 },
+    { width: 13,  height: 3,   depth: 8,  colorType: 2 },
+    { width: 7,   height: 13,  depth: 16, colorType: 4 },
+    { width: 5,   height: 5,   depth: 16, colorType: 6 },
+    { width: 600, height: 600, depth: 8,  colorType: 6 },
+  ];
+  for (const c of cases) {
+    const raw = Buffer.alloc(adam7RawSize(c.width, c.height, c.depth * channels[c.colorType]));
+    const label = `${c.width}x${c.height} depth ${c.depth} type ${c.colorType}`;
+    const fp = path.join(TMP, `interlaced_${c.width}x${c.height}_${c.depth}_${c.colorType}.png`);
+    await writeFile(fp, rawPng({ ...c, interlace: 1 }, raw, 6000));
+    const report = await auditFile(fp);
+    assert.ok(!findingCodes(report).includes("DECODE_FAIL"), `${label}: unexpected DECODE_FAIL ${JSON.stringify(report.findings)}`);
+    assert.equal(report.width, c.width, label);
+    assert.equal(report.height, c.height, label);
+  }
+});
+
+// --- audit argument parsing ------------------------------------------------
+
+function runAudit(cwd, args) {
+  return spawnSync(process.execPath, [CLI, "audit", ...args], { cwd, encoding: "utf8" });
+}
+
+test("audit treats arguments after -- as files, even when they start with --", async () => {
+  await writeFile(path.join(TMP, "--bad.png"), Buffer.from("junk"));
+  const r = runAudit(TMP, ["--", "--bad.png"]);
+  assert.equal(r.status, 2, `expected exit 2, got ${r.status}: ${r.stdout}${r.stderr}`);
+  assert.match(r.stdout, /--bad\.png/);
+  assert.match(r.stdout, /TINY_FILE/);
+  assert.match(r.stdout, /1 file\(s\) audited/);
+});
+
+test("audit rejects an unknown option instead of ignoring it", async () => {
+  await writeFile(path.join(TMP, "x.png"), Buffer.from("junk"));
+  const r = runAudit(TMP, ["--jsno", "x.png"]);
+  assert.equal(r.status, 64, `expected exit 64, got ${r.status}: ${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /--jsno/);
+  assert.doesNotMatch(r.stdout, /audited/);
+});
+
+test("audit --json still works before or after the file list", async () => {
+  const buf = makePng(600, 600, (x, y, r) => [(r() * 256) | 0, (r() * 256) | 0, (r() * 256) | 0, 255]);
+  await writeFile(path.join(TMP, "good.png"), buf);
+  for (const args of [["--json", "good.png"], ["good.png", "--json"]]) {
+    const r = runAudit(TMP, args);
+    assert.equal(r.status, 0, `expected exit 0 for ${args.join(" ")}, got ${r.status}: ${r.stdout}${r.stderr}`);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.reports.length, 1);
+    assert.equal(out.totalCritical, 0);
+  }
+});
+
+// --- direct invocation through a linked path --------------------------------
+
+test("lib/audit.mjs runs when invoked through a symlinked or junctioned directory", async () => {
+  // A junction needs no privilege on Windows; elsewhere the type is ignored
+  // and a plain directory symlink is made. The link gets its own tmpdir and is
+  // unlinked on its own, so nothing ever recurses through it into lib/.
+  const dir = await mkdtemp(path.join(tmpdir(), "st-link-"));
+  const link = path.join(dir, "lib-link");
+  const tiny = path.join(dir, "tiny.png");
+  await writeFile(tiny, Buffer.from("not a png"));
+  await symlink(LIB, link, "junction");
+  let r;
+  try {
+    r = spawnSync(process.execPath, [path.join(link, "audit.mjs"), tiny], { encoding: "utf8" });
+  } finally {
+    await unlink(link);
+  }
+  await rm(dir, { recursive: true, force: true });
+  assert.equal(r.status, 2, `expected exit 2 through the link, got ${r.status}: ${r.stdout}${r.stderr}`);
+  assert.match(r.stdout, /TINY_FILE/);
 });
 
 // --- teardown --------------------------------------------------------------

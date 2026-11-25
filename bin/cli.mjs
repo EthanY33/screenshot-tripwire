@@ -25,7 +25,7 @@ function help(exit = 0) {
 Usage:
   screenshot-tripwire audit [--json] <file>...   Audit one or more images
   screenshot-tripwire check                      Audit staged images under brand/goneidle-landing/
-  screenshot-tripwire install-hooks              Install pre-commit gate (composes with trailer-tripwire)
+  screenshot-tripwire install-hooks              Install pre-commit gate (shares the hook with the other tripwires)
   screenshot-tripwire help                       Show this message
 
 Short alias: \`st\` works the same as \`screenshot-tripwire\`.
@@ -50,4 +50,6 @@ if (!script) {
 const child = spawn(process.execPath, [path.join(LIB, script), ...rest], {
   stdio: "inherit",
 });
-child.on("exit", (code) => process.exit(code ?? 0));
+// A child killed by a signal reports code null: fail closed, never exit 0.
+child.on("error", (e) => { console.error(`screenshot-tripwire: failed to run ${cmd}: ${e.message}`); process.exit(1); });
+child.on("exit", (code) => process.exit(code ?? 1));
