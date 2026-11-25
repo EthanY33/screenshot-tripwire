@@ -329,6 +329,92 @@ test("a linked worktree installs into the hooks directory git actually uses", ()
   assert.ok(!fs.existsSync(path.join(wt, ".git", "hooks")), "a worktree's .git is a file, not a directory");
 });
 
+test("an install from a linked worktree keeps the sibling gates of the shared hook, also from a subdirectory", () => {
+  const repo = makeRepo();
+  git(repo, ...IDENTITY, "commit", "-q", "--allow-empty", "-m", "init");
+  const wt = path.join(ROOT, `worktree-${++counter}`);
+  git(repo, "worktree", "add", "-q", "-b", "side", wt);
+  // What the two sibling installers leave in the hook every worktree shares.
+  const trailer =
+    "# trailer-tripwire:v1\n" +
+    "npx --no -- trailer-tripwire check --dir 'brand/trailers/' || exit $?\n" +
+    "# trailer-tripwire:v1 end\n";
+  const copy =
+    "# copy-tripwire:v1\n" +
+    "npx --no -- copy-tripwire check || exit $?\n" +
+    "# copy-tripwire:v1 end\n";
+  writeHook(repo, HEADER + copy + "\n" + trailer);
+
+  const sub = path.join(wt, "brand", "goneidle-landing");
+  fs.mkdirSync(sub, { recursive: true });
+  const fromSub = install({ cwd: sub });
+  assert.equal(fromSub.ok, true);
+  assert.equal(fromSub.action, "migrated");
+  assert.equal(fs.realpathSync.native(fromSub.target), fs.realpathSync.native(hookPath(repo)));
+  assert.equal(
+    readHook(repo),
+    HEADER +
+      "# screenshot-tripwire:v1\n" +
+      "npx --no -- screenshot-tripwire check || exit $?\n" +
+      "# screenshot-tripwire:v1 end\n" +
+      "\n" +
+      trailer +
+      "\n" +
+      copy,
+  );
+  assert.deepEqual(fs.readdirSync(sub), [], "nothing may be written under the subdirectory");
+  assert.ok(fs.statSync(path.join(wt, ".git")).isFile(), "the worktree's .git must stay a file");
+
+  // The main worktree reads the same file and has nothing to change.
+  const settled = readHook(repo);
+  const fromMain = install({ cwd: repo });
+  assert.equal(fromMain.action, "unchanged");
+  assert.equal(fromMain.target, hookPath(repo));
+  assert.equal(readHook(repo), settled);
+});
+
+test("a relative core.hooksPath in a linked worktree resolves inside that worktree, where git runs it", () => {
+  const repo = makeRepo();
+  git(repo, "config", "core.hooksPath", ".githooks");
+  git(repo, ...IDENTITY, "commit", "-q", "--allow-empty", "-m", "init");
+  const wt = path.join(ROOT, `worktree-${++counter}`);
+  git(repo, "worktree", "add", "-q", "-b", "side", wt);
+
+  const result = install({ cwd: wt });
+  assert.equal(result.ok, true);
+  assert.equal(result.action, "created");
+  assert.equal(result.target, path.join(wt, ".githooks", "pre-commit"));
+  assert.ok(!fs.existsSync(path.join(repo, ".githooks")), "the main worktree must not get the hook of the linked one");
+  assert.ok(!fs.existsSync(hookPath(repo)), ".git/hooks must stay untouched");
+
+  // A stand-in npx that records its arguments where it runs, then fails.
+  const bin = makeDir("stub-bin");
+  fs.writeFileSync(
+    path.join(bin, "npx"),
+    '#!/bin/sh\nfor a in "$@"; do printf \'%s\\n\' "$a"; done > npx-args.txt\nexit 7\n',
+  );
+  fs.chmodSync(path.join(bin, "npx"), 0o755);
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (k.toUpperCase() !== "PATH") env[k] = v;
+  }
+  env.PATH = bin + path.delimiter + process.env.PATH;
+  const commit = (cwd) =>
+    spawnSync("git", [...IDENTITY, "commit", "-q", "--allow-empty", "-m", "probe"], { cwd, encoding: "utf8", env });
+
+  const blocked = commit(wt);
+  assert.notEqual(blocked.status, 0, "a commit in the linked worktree must run the installed gate");
+  assert.deepEqual(
+    fs.readFileSync(path.join(wt, "npx-args.txt"), "utf8").split("\n").filter(Boolean),
+    ["--no", "--", "screenshot-tripwire", "check"],
+  );
+
+  // A relative hooks path is per worktree: the main one has no hook file yet.
+  const main = commit(repo);
+  assert.equal(main.status, 0, `no gate is installed for the main worktree: ${main.stderr}`);
+  assert.ok(!fs.existsSync(path.join(repo, "npx-args.txt")), "no gate may run for the main worktree");
+});
+
 test("outside a git repository it reports that and writes nothing", () => {
   const dir = makeDir("plain");
   const result = install({ cwd: dir });
